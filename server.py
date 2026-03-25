@@ -1,8 +1,10 @@
+import argparse
 import json
-import os
 import pathlib
 import uuid
 from fastapi import FastAPI, HTTPException, Query
+from fastmcp import FastMCP
+from fastmcp.tools import tool
 from pydantic import BaseModel, Field
 from typing import Optional, List
 
@@ -105,7 +107,120 @@ def delete_idea(idea_id: str):
     return {"deleted": idea_id}
 
 
+def read_claude_instructions() -> str:
+    path = BASE_DIR / "CLAUDE.md"
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return "Publishing Agent MCP Server"
+
+
+def validate_status(status: str):
+    if status not in IdeaStatus:
+        raise ValueError(f"Ugyldig status: {status}")
+
+
+mcp = FastMCP(
+    name="Publishing Agent",
+    instructions=read_claude_instructions(),
+)
+
+
+@mcp.tool(name="save_idea", title="Save idea", description="Gem en idé i JSON-lager")
+def save_idea_tool(
+    title: str,
+    subtitle: Optional[str] = None,
+    bullets: Optional[List[str]] = None,
+    raw_idea: Optional[str] = None,
+    conversation: Optional[List[str]] = None,
+    status: str = "ny",
+):
+    validate_status(status)
+    idea = Idea(
+        title=title,
+        subtitle=subtitle,
+        bullets=bullets or [],
+        raw_idea=raw_idea,
+        conversation=conversation or [],
+        status=status,
+    )
+    ideas = load_ideas()
+    ideas.append(idea.dict())
+    save_ideas(ideas)
+    return {"id": idea.id}
+
+
+@mcp.tool(name="get_ideas", title="Get ideas", description="Hent liste af idéer (kan filtreres på status)")
+def get_ideas_tool(status: Optional[str] = None):
+    ideas = load_ideas()
+    if status:
+        validate_status(status)
+        ideas = [idea for idea in ideas if idea.get("status") == status]
+    return ideas
+
+
+@mcp.tool(name="get_idea", title="Get idea", description="Hent enkelt idé fra lager")
+def get_idea_tool(idea_id: str):
+    ideas = load_ideas()
+    for idea in ideas:
+        if idea["id"] == idea_id:
+            return idea
+    raise ValueError("Idé ikke fundet")
+
+
+@mcp.tool(name="update_idea", title="Update idea", description="Opdater idéfelter")
+def update_idea_tool(
+    idea_id: str,
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None,
+    bullets: Optional[List[str]] = None,
+    raw_idea: Optional[str] = None,
+    conversation: Optional[List[str]] = None,
+    status: Optional[str] = None,
+):
+    ideas = load_ideas()
+    for idx, idea in enumerate(ideas):
+        if idea["id"] == idea_id:
+            update_data = {}
+            if title is not None:
+                update_data["title"] = title
+            if subtitle is not None:
+                update_data["subtitle"] = subtitle
+            if bullets is not None:
+                update_data["bullets"] = bullets
+            if raw_idea is not None:
+                update_data["raw_idea"] = raw_idea
+            if conversation is not None:
+                update_data["conversation"] = conversation
+            if status is not None:
+                validate_status(status)
+                update_data["status"] = status
+            idea.update(update_data)
+            ideas[idx] = idea
+            save_ideas(ideas)
+            return idea
+    raise ValueError("Idé ikke fundet")
+
+
+@mcp.tool(name="delete_idea", title="Delete idea", description="Slet en idé")
+def delete_idea_tool(idea_id: str):
+    ideas = load_ideas()
+    new_ideas = [idea for idea in ideas if idea["id"] != idea_id]
+    if len(new_ideas) == len(ideas):
+        raise ValueError("Idé ikke fundet")
+    save_ideas(new_ideas)
+    return {"deleted": idea_id}
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("server:app", host="127.0.0.1", port=8000, log_level="info")
+    parser = argparse.ArgumentParser(description="Run Publishing Agent server")
+    parser.add_argument("--port", type=int, default=8000, help="FastAPI port")
+    parser.add_argument("--mcp-port", type=int, default=9000, help="FastMCP HTTP port")
+    parser.add_argument("--mode", choices=["api", "mcp"], default="api", help="Start mode")
+    args = parser.parse_args()
+
+    if args.mode == "mcp":
+        mcp.run(transport="http", host="127.0.0.1", port=args.mcp_port)
+    else:
+        uvicorn.run("server:app", host="127.0.0.1", port=args.port, log_level="info")
